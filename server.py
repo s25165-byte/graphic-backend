@@ -8,806 +8,749 @@ from urllib.parse import parse_qs, urlparse
 
 from supabase import create_client
 
-# ============================================================
 
+# ============================================================
 # 基本设置
-
 # ============================================================
 
-ROOT = Path(**file**).resolve().parent
+ROOT = Path(__file__).resolve().parent
 
 ADMIN_USERNAME = "admin"
 
-# 建议以后把管理员密码也放到 Render Environment Variables
-
 ADMIN_PASSWORD = os.environ.get(
-"ADMIN_PASSWORD",
-"12345678"
+    "ADMIN_PASSWORD",
+    "12345678"
 )
 
+
 # ============================================================
-
 # Supabase
-
 # ============================================================
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
-# 如果你目前只设置了一个环境变量，
-
-# 也支持：
-
+# 如果使用一个环境变量：
 #
-
 # SUPABASE_CONFIG=
-
-# [https://xxxxx.supabase.co|sb_secret_xxxxx](https://xxxxx.supabase.co|sb_secret_xxxxx)
-
-#
+# https://xxxxx.supabase.co|sb_xxxxx
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-config = os.environ.get("SUPABASE_CONFIG", "")
+    config = os.environ.get("SUPABASE_CONFIG", "")
 
-```
-if "|" in config:
-    SUPABASE_URL, SUPABASE_KEY = config.split("|", 1)
-```
+    if "|" in config:
+        SUPABASE_URL, SUPABASE_KEY = config.split("|", 1)
 
 SUPABASE_URL = SUPABASE_URL.strip()
 SUPABASE_KEY = SUPABASE_KEY.strip()
 
 if not SUPABASE_URL or not SUPABASE_KEY:
-raise RuntimeError(
-"Missing SUPABASE_URL / SUPABASE_KEY"
-)
+    raise RuntimeError(
+        "Missing SUPABASE_URL / SUPABASE_KEY"
+    )
 
 supabase = create_client(
-SUPABASE_URL,
-SUPABASE_KEY
+    SUPABASE_URL,
+    SUPABASE_KEY
 )
 
+
 # ============================================================
-
 # Session
-
 # ============================================================
 
 SESSIONS = set()
 
+
 # ============================================================
-
 # Supabase 数据库
-
 # ============================================================
 
 def add_email(email):
 
-```
-# 先检查这个 Gmail 是否存在
-# 包括 starred = true 的记录
-result = (
-    supabase
-    .table("subscribers")
-    .select("id, email, starred")
-    .eq("email", email)
-    .limit(1)
-    .execute()
-)
+    try:
+        result = (
+            supabase
+            .table("subscribers")
+            .select("id, email, starred")
+            .eq("email", email)
+            .limit(1)
+            .execute()
+        )
 
-if result.data:
-    existing = result.data[0]
+        if result.data:
+            existing = result.data[0]
 
-    if existing.get("starred"):
-        return "blocked"
+            if existing.get("starred"):
+                return "blocked"
 
-    return "exists"
+            return "exists"
 
-try:
+        supabase.table("subscribers").insert({
+            "email": email,
+            "starred": False
+        }).execute()
 
-    supabase.table("subscribers").insert({
-        "email": email,
-        "starred": False
-    }).execute()
+        return "success"
 
-    return "success"
+    except Exception as e:
+        print("ADD EMAIL ERROR:", e)
+        return "error"
 
-except Exception as e:
-
-    print("ADD EMAIL ERROR:", e)
-
-    return "error"
-```
 
 def get_emails():
 
-```
-result = (
-    supabase
-    .table("subscribers")
-    .select(
-        "id, email, created_at, starred"
-    )
-    .order(
-        "id",
-        desc=True
-    )
-    .execute()
-)
+    try:
+        result = (
+            supabase
+            .table("subscribers")
+            .select(
+                "id, email, created_at, starred"
+            )
+            .order(
+                "id",
+                desc=True
+            )
+            .execute()
+        )
 
-return result.data or []
-```
+        return result.data or []
+
+    except Exception as e:
+        print("GET EMAILS ERROR:", e)
+        return []
+
 
 def delete_email(email_id):
 
-```
-# 注意：
-# starred 的记录不能真正删除。
-#
-# 因为你的要求是：
-# ⭐之后，即使删除，也不能再次填写相同 Gmail。
-#
-# 所以：
-# 普通记录 -> 删除
-# ⭐记录 -> 保留，只是不显示在普通列表中
+    try:
+        result = (
+            supabase
+            .table("subscribers")
+            .select("id, starred")
+            .eq("id", email_id)
+            .limit(1)
+            .execute()
+        )
 
-result = (
-    supabase
-    .table("subscribers")
-    .select("id, starred")
-    .eq("id", email_id)
-    .limit(1)
-    .execute()
-)
+        if not result.data:
+            return "not_found"
 
-if not result.data:
-    return "not_found"
+        record = result.data[0]
 
-record = result.data[0]
+        # ⭐保护的邮箱不能删除
+        if record.get("starred"):
+            return "starred"
 
-if record.get("starred"):
-    return "starred"
+        supabase.table("subscribers").delete().eq(
+            "id",
+            email_id
+        ).execute()
 
-supabase.table("subscribers").delete().eq(
-    "id",
-    email_id
-).execute()
+        return "deleted"
 
-return "deleted"
-```
+    except Exception as e:
+        print("DELETE EMAIL ERROR:", e)
+        return "error"
+
 
 def star_email(email_id):
 
-```
-result = (
-    supabase
-    .table("subscribers")
-    .update({
-        "starred": True
-    })
-    .eq("id", email_id)
-    .execute()
-)
+    try:
+        result = (
+            supabase
+            .table("subscribers")
+            .update({
+                "starred": True
+            })
+            .eq("id", email_id)
+            .execute()
+        )
 
-if result.data:
-    return True
+        if result.data:
+            return True
 
-return False
-```
+        return False
+
+    except Exception as e:
+        print("STAR EMAIL ERROR:", e)
+        return False
+
 
 # ============================================================
-
 # HTTP Server
-
 # ============================================================
 
 class WebsiteServer(BaseHTTPRequestHandler):
 
-```
-# --------------------------------------------------------
-# JSON
-# --------------------------------------------------------
+    # --------------------------------------------------------
+    # JSON
+    # --------------------------------------------------------
 
-def send_json(self, status, data):
+    def send_json(self, status, data):
 
-    body = json.dumps(
-        data,
-        ensure_ascii=False
-    ).encode("utf-8")
+        body = json.dumps(
+            data,
+            ensure_ascii=False
+        ).encode("utf-8")
 
-    self.send_response(status)
-
-    self.send_header(
-        "Content-Type",
-        "application/json; charset=utf-8"
-    )
-
-    self.send_header(
-        "Content-Length",
-        str(len(body))
-    )
-
-    self.end_headers()
-
-    self.wfile.write(body)
-
-# --------------------------------------------------------
-# Cookie
-# --------------------------------------------------------
-
-def get_session(self):
-
-    cookie = self.headers.get(
-        "Cookie",
-        ""
-    )
-
-    for item in cookie.split(";"):
-
-        item = item.strip()
-
-        if item.startswith("session="):
-
-            return item.split(
-                "=",
-                1
-            )[1]
-
-    return None
-
-def is_logged_in(self):
-
-    session = self.get_session()
-
-    return (
-        session is not None
-        and
-        session in SESSIONS
-    )
-
-# --------------------------------------------------------
-# GET
-# --------------------------------------------------------
-
-def do_GET(self):
-
-    path = urlparse(
-        self.path
-    ).path
-
-    # 首页
-    if (
-        path == "/"
-        or
-        path == "/ggsjxh.html"
-    ):
-
-        self.serve_file(
-            ROOT / "ggsjxh.html",
-            "text/html; charset=utf-8"
-        )
-
-        return
-
-    # CSS
-    if path.startswith("/css/"):
-
-        file_path = (
-            ROOT /
-            path.lstrip("/")
-        )
-
-        if file_path.is_file():
-
-            self.serve_file(
-                file_path,
-                "text/css; charset=utf-8"
-            )
-
-            return
-
-    # JavaScript
-    if path.startswith("/js/"):
-
-        file_path = (
-            ROOT /
-            path.lstrip("/")
-        )
-
-        if file_path.is_file():
-
-            self.serve_file(
-                file_path,
-                "application/javascript; charset=utf-8"
-            )
-
-            return
-
-    # 登录页面
-    if path == "/admin/login":
-
-        self.login_page()
-
-        return
-
-    # 管理后台
-    if path == "/admin":
-
-        if not self.is_logged_in():
-
-            self.redirect(
-                "/admin/login"
-            )
-
-            return
-
-        self.admin_page()
-
-        return
-
-    # 登出
-    if path == "/admin/logout":
-
-        session = self.get_session()
-
-        if session in SESSIONS:
-
-            SESSIONS.remove(session)
-
-        self.send_response(302)
+        self.send_response(status)
 
         self.send_header(
-            "Location",
-            "/admin/login"
+            "Content-Type",
+            "application/json; charset=utf-8"
         )
 
         self.send_header(
-            "Set-Cookie",
-            "session=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict"
+            "Content-Length",
+            str(len(body))
         )
 
         self.end_headers()
 
-        return
+        self.wfile.write(body)
 
-    self.send_error(
-        404,
-        "Not Found"
-    )
+    # --------------------------------------------------------
+    # Cookie
+    # --------------------------------------------------------
 
-# --------------------------------------------------------
-# POST
-# --------------------------------------------------------
+    def get_session(self):
 
-def do_POST(self):
-
-    path = urlparse(
-        self.path
-    ).path
-
-    # ====================================================
-    # 登录
-    # ====================================================
-
-    if path == "/admin/login":
-
-        length = int(
-            self.headers.get(
-                "Content-Length",
-                "0"
-            )
+        cookie = self.headers.get(
+            "Cookie",
+            ""
         )
 
-        raw_data = self.rfile.read(
-            length
+        for item in cookie.split(";"):
+
+            item = item.strip()
+
+            if item.startswith("session="):
+
+                return item.split(
+                    "=",
+                    1
+                )[1]
+
+        return None
+
+    def is_logged_in(self):
+
+        session = self.get_session()
+
+        return (
+            session is not None
+            and session in SESSIONS
         )
 
-        data = parse_qs(
-            raw_data.decode("utf-8")
-        )
+    # --------------------------------------------------------
+    # GET
+    # --------------------------------------------------------
 
-        username = data.get(
-            "username",
-            [""]
-        )[0]
+    def do_GET(self):
 
-        password = data.get(
-            "password",
-            [""]
-        )[0]
+        path = urlparse(
+            self.path
+        ).path
 
+        # 首页
         if (
-            secrets.compare_digest(
-                username,
-                ADMIN_USERNAME
-            )
-            and
-            secrets.compare_digest(
-                password,
-                ADMIN_PASSWORD
-            )
+            path == "/"
+            or path == "/ggsjxh.html"
         ):
 
-            session = secrets.token_urlsafe(
-                32
+            self.serve_file(
+                ROOT / "ggsjxh.html",
+                "text/html; charset=utf-8"
             )
 
-            SESSIONS.add(
-                session
+            return
+
+        # CSS
+        if path.startswith("/css/"):
+
+            file_path = (
+                ROOT /
+                path.lstrip("/")
             )
+
+            if file_path.is_file():
+
+                self.serve_file(
+                    file_path,
+                    "text/css; charset=utf-8"
+                )
+
+                return
+
+        # JavaScript
+        if path.startswith("/js/"):
+
+            file_path = (
+                ROOT /
+                path.lstrip("/")
+            )
+
+            if file_path.is_file():
+
+                self.serve_file(
+                    file_path,
+                    "application/javascript; charset=utf-8"
+                )
+
+                return
+
+        # 管理员登录
+        if path == "/admin/login":
+
+            self.login_page()
+
+            return
+
+        # 管理后台
+        if path == "/admin":
+
+            if not self.is_logged_in():
+
+                self.redirect(
+                    "/admin/login"
+                )
+
+                return
+
+            self.admin_page()
+
+            return
+
+        # 登出
+        if path == "/admin/logout":
+
+            session = self.get_session()
+
+            if session in SESSIONS:
+
+                SESSIONS.remove(session)
 
             self.send_response(302)
 
             self.send_header(
                 "Location",
-                "/admin"
+                "/admin/login"
             )
 
             self.send_header(
                 "Set-Cookie",
-                f"session={session}; Path=/; HttpOnly; SameSite=Strict"
+                "session=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict"
             )
 
             self.end_headers()
 
             return
 
-        self.login_page(
-            "Incorrect username or password."
+        self.send_error(
+            404,
+            "Not Found"
         )
 
-        return
+    # --------------------------------------------------------
+    # POST
+    # --------------------------------------------------------
 
-    # ====================================================
-    # 报名
-    # ====================================================
+    def do_POST(self):
 
-    if path == "/subscribe":
+        path = urlparse(
+            self.path
+        ).path
 
-        length = int(
-            self.headers.get(
-                "Content-Length",
-                "0"
+        # ====================================================
+        # 管理员登录
+        # ====================================================
+
+        if path == "/admin/login":
+
+            length = int(
+                self.headers.get(
+                    "Content-Length",
+                    "0"
+                )
             )
-        )
 
-        raw_data = self.rfile.read(
-            length
-        )
+            raw_data = self.rfile.read(
+                length
+            )
 
-        content_type = self.headers.get(
-            "Content-Type",
-            ""
-        )
+            data = parse_qs(
+                raw_data.decode("utf-8")
+            )
 
-        # JSON
-        if "application/json" in content_type:
+            username = data.get(
+                "username",
+                [""]
+            )[0]
 
-            try:
+            password = data.get(
+                "password",
+                [""]
+            )[0]
 
-                data = json.loads(
-                    raw_data.decode(
-                        "utf-8"
-                    )
+            if (
+                secrets.compare_digest(
+                    username,
+                    ADMIN_USERNAME
+                )
+                and
+                secrets.compare_digest(
+                    password,
+                    ADMIN_PASSWORD
+                )
+            ):
+
+                session = secrets.token_urlsafe(32)
+
+                SESSIONS.add(session)
+
+                self.send_response(302)
+
+                self.send_header(
+                    "Location",
+                    "/admin"
                 )
 
-                email = str(
-                    data.get(
-                        "email",
-                        ""
-                    )
-                ).strip().lower()
+                self.send_header(
+                    "Set-Cookie",
+                    f"session={session}; Path=/; HttpOnly; SameSite=Strict"
+                )
 
-            except Exception:
+                self.end_headers()
+
+                return
+
+            self.login_page(
+                "Incorrect username or password."
+            )
+
+            return
+
+        # ====================================================
+        # 报名
+        # ====================================================
+
+        if path == "/subscribe":
+
+            length = int(
+                self.headers.get(
+                    "Content-Length",
+                    "0"
+                )
+            )
+
+            raw_data = self.rfile.read(
+                length
+            )
+
+            content_type = self.headers.get(
+                "Content-Type",
+                ""
+            )
+
+            if "application/json" in content_type:
+
+                try:
+
+                    data = json.loads(
+                        raw_data.decode("utf-8")
+                    )
+
+                    email = str(
+                        data.get(
+                            "email",
+                            ""
+                        )
+                    ).strip().lower()
+
+                except Exception:
+
+                    self.send_json(
+                        400,
+                        {
+                            "error":
+                            "Invalid data."
+                        }
+                    )
+
+                    return
+
+            else:
+
+                data = parse_qs(
+                    raw_data.decode("utf-8")
+                )
+
+                email = data.get(
+                    "email",
+                    [""]
+                )[0].strip().lower()
+
+            # Gmail 检查
+            if not email.endswith("@gmail.com"):
 
                 self.send_json(
                     400,
                     {
                         "error":
-                        "Invalid data."
+                        "Please enter a valid Gmail address."
                     }
                 )
 
                 return
 
-        # Form
-        else:
+            result = add_email(email)
 
-            data = parse_qs(
-                raw_data.decode(
-                    "utf-8"
+            if result == "success":
+
+                self.send_json(
+                    201,
+                    {
+                        "message":
+                        "Registration successful!"
+                    }
                 )
-            )
 
-            email = data.get(
-                "email",
-                [""]
-            )[0].strip().lower()
+            elif result == "blocked":
 
-        # Gmail 检查
-        if not email.endswith(
-            "@gmail.com"
-        ):
+                self.send_json(
+                    403,
+                    {
+                        "error":
+                        "This email has been blocked."
+                    }
+                )
 
-            self.send_json(
-                400,
-                {
-                    "error":
-                    "Please enter a valid Gmail address."
-                }
-            )
+            elif result == "exists":
 
-            return
+                self.send_json(
+                    200,
+                    {
+                        "message":
+                        "This email is already registered."
+                    }
+                )
 
-        # 保存
-        result = add_email(
-            email
-        )
+            else:
 
-        if result == "success":
-
-            self.send_json(
-                201,
-                {
-                    "message":
-                    "Registration successful!"
-                }
-            )
-
-        elif result == "blocked":
-
-            self.send_json(
-                403,
-                {
-                    "error":
-                    "This email has been blocked."
-                }
-            )
-
-        elif result == "exists":
-
-            self.send_json(
-                200,
-                {
-                    "message":
-                    "This email is already registered."
-                }
-            )
-
-        else:
-
-            self.send_json(
-                500,
-                {
-                    "error":
-                    "Database error."
-                }
-            )
-
-        return
-
-    # ====================================================
-    # ⭐ 标记
-    # ====================================================
-
-    if path.startswith(
-        "/admin/star/"
-    ):
-
-        if not self.is_logged_in():
-
-            self.send_json(
-                401,
-                {
-                    "error":
-                    "Unauthorized."
-                }
-            )
+                self.send_json(
+                    500,
+                    {
+                        "error":
+                        "Database error."
+                    }
+                )
 
             return
 
-        email_id = path.split(
-            "/"
-        )[-1]
+        # ====================================================
+        # ⭐ 标记
+        # ====================================================
 
-        if not email_id.isdigit():
+        if path.startswith("/admin/star/"):
 
-            self.send_json(
-                400,
-                {
-                    "error":
-                    "Invalid ID."
-                }
-            )
+            if not self.is_logged_in():
 
-            return
+                self.send_json(
+                    401,
+                    {
+                        "error":
+                        "Unauthorized."
+                    }
+                )
 
-        if star_email(
-            int(email_id)
-        ):
+                return
 
-            self.send_json(
-                200,
-                {
-                    "message":
-                    "Starred successfully."
-                }
-            )
+            email_id = path.split("/")[-1]
 
-        else:
+            if not email_id.isdigit():
 
-            self.send_json(
-                404,
-                {
-                    "error":
-                    "Email not found."
-                }
-            )
+                self.send_json(
+                    400,
+                    {
+                        "error":
+                        "Invalid ID."
+                    }
+                )
 
-        return
+                return
 
-    # ====================================================
-    # 删除
-    # ====================================================
+            if star_email(int(email_id)):
 
-    if path.startswith(
-        "/admin/delete/"
-    ):
+                self.send_json(
+                    200,
+                    {
+                        "message":
+                        "Starred successfully."
+                    }
+                )
 
-        if not self.is_logged_in():
+            else:
 
-            self.send_json(
-                401,
-                {
-                    "error":
-                    "Unauthorized."
-                }
-            )
+                self.send_json(
+                    404,
+                    {
+                        "error":
+                        "Email not found."
+                    }
+                )
 
             return
 
-        email_id = path.split(
-            "/"
-        )[-1]
+        # ====================================================
+        # 删除
+        # ====================================================
 
-        if not email_id.isdigit():
+        if path.startswith("/admin/delete/"):
 
-            self.send_json(
-                400,
-                {
-                    "error":
-                    "Invalid ID."
-                }
+            if not self.is_logged_in():
+
+                self.send_json(
+                    401,
+                    {
+                        "error":
+                        "Unauthorized."
+                    }
+                )
+
+                return
+
+            email_id = path.split("/")[-1]
+
+            if not email_id.isdigit():
+
+                self.send_json(
+                    400,
+                    {
+                        "error":
+                        "Invalid ID."
+                    }
+                )
+
+                return
+
+            result = delete_email(
+                int(email_id)
             )
+
+            if result == "deleted":
+
+                self.send_json(
+                    200,
+                    {
+                        "message":
+                        "Deleted successfully."
+                    }
+                )
+
+            elif result == "starred":
+
+                self.send_json(
+                    403,
+                    {
+                        "error":
+                        "Starred emails cannot be deleted."
+                    }
+                )
+
+            else:
+
+                self.send_json(
+                    404,
+                    {
+                        "error":
+                        "Email not found."
+                    }
+                )
 
             return
-
-        result = delete_email(
-            int(email_id)
-        )
-
-        if result == "deleted":
-
-            self.send_json(
-                200,
-                {
-                    "message":
-                    "Deleted successfully."
-                }
-            )
-
-        elif result == "starred":
-
-            self.send_json(
-                403,
-                {
-                    "error":
-                    "Starred emails cannot be deleted."
-                }
-            )
-
-        else:
-
-            self.send_json(
-                404,
-                {
-                    "error":
-                    "Email not found."
-                }
-            )
-
-        return
-
-    self.send_error(
-        404,
-        "Not Found"
-    )
-
-# --------------------------------------------------------
-# 文件
-# --------------------------------------------------------
-
-def serve_file(
-    self,
-    file_path,
-    content_type
-):
-
-    if not file_path.is_file():
 
         self.send_error(
             404,
-            "File not found"
+            "Not Found"
         )
 
-        return
+    # --------------------------------------------------------
+    # 文件
+    # --------------------------------------------------------
 
-    body = file_path.read_bytes()
-
-    self.send_response(
-        200
-    )
-
-    self.send_header(
-        "Content-Type",
+    def serve_file(
+        self,
+        file_path,
         content_type
-    )
+    ):
 
-    self.send_header(
-        "Content-Length",
-        str(len(body))
-    )
+        if not file_path.is_file():
 
-    self.end_headers()
+            self.send_error(
+                404,
+                "File not found"
+            )
 
-    self.wfile.write(
-        body
-    )
+            return
 
-# --------------------------------------------------------
-# Redirect
-# --------------------------------------------------------
+        body = file_path.read_bytes()
 
-def redirect(
-    self,
-    location
-):
+        self.send_response(200)
 
-    self.send_response(
-        302
-    )
+        self.send_header(
+            "Content-Type",
+            content_type
+        )
 
-    self.send_header(
-        "Location",
+        self.send_header(
+            "Content-Length",
+            str(len(body))
+        )
+
+        self.end_headers()
+
+        self.wfile.write(body)
+
+    # --------------------------------------------------------
+    # Redirect
+    # --------------------------------------------------------
+
+    def redirect(
+        self,
         location
-    )
+    ):
 
-    self.end_headers()
+        self.send_response(302)
 
-# --------------------------------------------------------
-# Login
-# --------------------------------------------------------
+        self.send_header(
+            "Location",
+            location
+        )
 
-def login_page(
-    self,
-    error=""
-):
+        self.end_headers()
 
-    error_html = ""
+    # --------------------------------------------------------
+    # Login
+    # --------------------------------------------------------
 
-    if error:
+    def login_page(
+        self,
+        error=""
+    ):
 
-        error_html = f"""
-        <p style="color:red;">
-            {html.escape(error)}
-        </p>
-        """
+        error_html = ""
 
-    page = f"""
-```
+        if error:
 
+            error_html = f"""
+            <p style="color:red;">
+                {html.escape(error)}
+            </p>
+            """
+
+        page = f"""
 <!DOCTYPE html>
-
 <html lang="en">
 
 <head>
@@ -815,7 +758,7 @@ def login_page(
 <meta charset="UTF-8">
 
 <meta name="viewport"
-content="width=device-width, initial-scale=1.0">
+      content="width=device-width, initial-scale=1.0">
 
 <title>Admin Login</title>
 
@@ -887,30 +830,28 @@ button {{
 {error_html}
 
 <form method="POST"
-action="/admin/login">
+      action="/admin/login">
 
 <label>Username</label>
 
 <input
-type="text"
-name="username"
-autocomplete="username"
-required
-
+    type="text"
+    name="username"
+    autocomplete="username"
+    required
 >
 
 <label>Password</label>
 
 <input
-type="password"
-name="password"
-autocomplete="current-password"
-required
-
+    type="password"
+    name="password"
+    autocomplete="current-password"
+    required
 >
 
 <button type="submit">
-Login
+    Login
 </button>
 
 </form>
@@ -922,153 +863,137 @@ Login
 </html>
 """
 
-```
-    body = page.encode(
-        "utf-8"
-    )
+        body = page.encode("utf-8")
 
-    self.send_response(
-        200
-    )
+        self.send_response(200)
 
-    self.send_header(
-        "Content-Type",
-        "text/html; charset=utf-8"
-    )
-
-    self.send_header(
-        "Content-Length",
-        str(len(body))
-    )
-
-    self.end_headers()
-
-    self.wfile.write(
-        body
-    )
-
-# --------------------------------------------------------
-# Admin Dashboard
-# --------------------------------------------------------
-
-def admin_page(self):
-
-    subscribers = get_emails()
-
-    rows = ""
-
-    active_count = 0
-    starred_count = 0
-
-    for item in subscribers:
-
-        email_id = item["id"]
-        email = item["email"]
-        created_at = item["created_at"]
-        starred = item.get(
-            "starred",
-            False
+        self.send_header(
+            "Content-Type",
+            "text/html; charset=utf-8"
         )
 
-        if starred:
-            starred_count += 1
+        self.send_header(
+            "Content-Length",
+            str(len(body))
+        )
 
-        else:
-            active_count += 1
+        self.end_headers()
 
-        star_button = ""
+        self.wfile.write(body)
 
-        if starred:
+    # --------------------------------------------------------
+    # Admin Dashboard
+    # --------------------------------------------------------
 
-            star_button = """
-            <span
-                style="
-                font-size:24px;
-                color:gold;
-                "
-                title="Blocked email"
-            >
-                ★
-            </span>
+    def admin_page(self):
+
+        subscribers = get_emails()
+
+        rows = ""
+
+        active_count = 0
+        starred_count = 0
+
+        for item in subscribers:
+
+            email_id = item["id"]
+            email = item["email"]
+            created_at = item["created_at"]
+            starred = item.get(
+                "starred",
+                False
+            )
+
+            if starred:
+                starred_count += 1
+            else:
+                active_count += 1
+
+            if starred:
+
+                star_button = """
+                <span
+                    style="
+                    font-size:24px;
+                    color:gold;
+                    "
+                    title="Blocked email"
+                >
+                    ★
+                </span>
+                """
+
+            else:
+
+                star_button = f"""
+                <button
+                    onclick="starEmail({email_id})"
+                    title="Block this email"
+                >
+                    ☆
+                </button>
+                """
+
+            if starred:
+
+                delete_button = """
+                <span
+                    style="color:#999;"
+                    title="Starred emails cannot be deleted"
+                >
+                    Protected
+                </span>
+                """
+
+            else:
+
+                delete_button = f"""
+                <button
+                    onclick="deleteEmail({email_id})"
+                >
+                    Delete
+                </button>
+                """
+
+            rows += f"""
+            <tr>
+
+                <td>
+                    {email_id}
+                </td>
+
+                <td>
+                    {html.escape(email)}
+                </td>
+
+                <td>
+                    {html.escape(str(created_at))}
+                </td>
+
+                <td>
+                    {star_button}
+                </td>
+
+                <td>
+                    {delete_button}
+                </td>
+
+            </tr>
             """
 
-        else:
+        if not rows:
 
-            star_button = f"""
-            <button
-                onclick="starEmail({email_id})"
-                title="Block this email"
-            >
-                ☆
-            </button>
+            rows = """
+            <tr>
+
+                <td colspan="5">
+                    No registrations yet.
+                </td>
+
+            </tr>
             """
 
-        delete_button = ""
-
-        if starred:
-
-            delete_button = """
-            <span
-                style="color:#999;"
-                title="Starred emails cannot be deleted"
-            >
-                Protected
-            </span>
-            """
-
-        else:
-
-            delete_button = f"""
-            <button
-                onclick="deleteEmail({email_id})"
-            >
-                Delete
-            </button>
-            """
-
-        rows += f"""
-        <tr>
-
-            <td>
-                {email_id}
-            </td>
-
-            <td>
-                {html.escape(email)}
-            </td>
-
-            <td>
-                {html.escape(
-                    str(created_at)
-                )}
-            </td>
-
-            <td>
-                {star_button}
-            </td>
-
-            <td>
-                {delete_button}
-            </td>
-
-        </tr>
-        """
-
-    if not rows:
-
-        rows = """
-        <tr>
-
-            <td colspan="5">
-                No registrations yet.
-            </td>
-
-        </tr>
-        """
-
-    page = f"""
-```
-
+        page = f"""
 <!DOCTYPE html>
 
 <html lang="en">
@@ -1078,7 +1003,7 @@ def admin_page(self):
 <meta charset="UTF-8">
 
 <meta name="viewport"
-content="width=device-width, initial-scale=1.0">
+      content="width=device-width, initial-scale=1.0">
 
 <title>Admin Dashboard</title>
 
@@ -1106,6 +1031,7 @@ body {{
 
 .actions {{
     display: flex;
+
     gap: 10px;
 }}
 
@@ -1147,13 +1073,17 @@ button {{
 
 .stats {{
     display: flex;
+
     gap: 30px;
+
     margin-bottom: 20px;
 }}
 
 .stat {{
     padding: 12px 18px;
+
     border: 1px solid #ddd;
+
     border-radius: 8px;
 }}
 
@@ -1170,14 +1100,16 @@ button {{
 <div class="actions">
 
 <button
-class="refresh"
-onclick="refreshData()">
-↻ Refresh </button>
+    class="refresh"
+    onclick="refreshData()">
+    ↻ Refresh
+</button>
 
 <a
-class="logout"
-href="/admin/logout">
-Logout </a>
+    class="logout"
+    href="/admin/logout">
+    Logout
+</a>
 
 </div>
 
@@ -1253,7 +1185,6 @@ async function starEmail(id) {{
     }} else {{
         alert("Failed to star this email.");
     }}
-
 }}
 
 
@@ -1275,6 +1206,7 @@ async function deleteEmail(id) {{
     if (response.ok) {{
         location.reload();
     }} else {{
+
         const data = await response.json()
             .catch(() => ({{}}));
 
@@ -1283,11 +1215,9 @@ async function deleteEmail(id) {{
             "Failed to delete."
         );
     }}
-
 }}
 
 
-// 内部刷新
 function refreshData() {{
 
     location.reload();
@@ -1301,64 +1231,54 @@ function refreshData() {{
 </html>
 """
 
-```
-    body = page.encode(
-        "utf-8"
-    )
+        body = page.encode("utf-8")
 
-    self.send_response(
-        200
-    )
+        self.send_response(200)
 
-    self.send_header(
-        "Content-Type",
-        "text/html; charset=utf-8"
-    )
+        self.send_header(
+            "Content-Type",
+            "text/html; charset=utf-8"
+        )
 
-    self.send_header(
-        "Content-Length",
-        str(len(body))
-    )
+        self.send_header(
+            "Content-Length",
+            str(len(body))
+        )
 
-    self.end_headers()
+        self.end_headers()
 
-    self.wfile.write(
-        body
-    )
-```
+        self.wfile.write(body)
+
 
 # ============================================================
-
 # 启动
-
 # ============================================================
 
-if **name** == "**main**":
+if __name__ == "__main__":
 
-```
-PORT = int(
-    os.environ.get(
-        "PORT",
-        8000
+    PORT = int(
+        os.environ.get(
+            "PORT",
+            8000
+        )
     )
-)
 
-server = ThreadingHTTPServer(
-    ("0.0.0.0", PORT),
-    WebsiteServer
-)
+    server = ThreadingHTTPServer(
+        ("0.0.0.0", PORT),
+        WebsiteServer
+    )
 
-print("================================")
-print("Graphic Backend")
-print()
-print("Port:", PORT)
-print("Supabase:", SUPABASE_URL)
-print()
-print("Admin:")
-print("/admin")
-print()
-print("Username:")
-print(ADMIN_USERNAME)
-print("================================")
+    print("================================")
+    print("Graphic Backend")
+    print()
+    print("Port:", PORT)
+    print("Supabase:", SUPABASE_URL)
+    print()
+    print("Admin:")
+    print("/admin")
+    print()
+    print("Username:")
+    print(ADMIN_USERNAME)
+    print("================================")
 
-server.serve_forever()
+    server.serve_forever()
