@@ -1,11 +1,14 @@
-
 import html
 import json
 import secrets
 import sqlite3
+import time
+import os
+
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+
 
 # ============================================================
 # 基本设置
@@ -14,14 +17,13 @@ from urllib.parse import parse_qs, urlparse
 ROOT = Path(__file__).resolve().parent
 DATABASE = ROOT / "subscribers.db"
 
-# 管理员账号
 ADMIN_USERNAME = "admin"
 
-# !!! 把这里改成你自己的密码 !!!
+# !!! 建议你修改成自己的强密码 !!!
 ADMIN_PASSWORD = "12345678"
 
-# 登录 Session
-SESSIONS = set()
+# Session 有效时间：30天
+SESSION_DURATION = 30 * 24 * 60 * 60
 
 
 # ============================================================
@@ -29,46 +31,228 @@ SESSIONS = set()
 # ============================================================
 
 def init_database():
+
     with sqlite3.connect(DATABASE) as conn:
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS subscribers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 email TEXT NOT NULL UNIQUE COLLATE NOCASE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                starred INTEGER NOT NULL DEFAULT 0
             )
         """)
+
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                token TEXT PRIMARY KEY,
+                created_at INTEGER NOT NULL
+            )
+        """)
+
         conn.commit()
 
 
-def add_email(email):
+# ============================================================
+# Gmail
+# ============================================================
+
+def normalize_email(email):
+
+    return email.strip().lower()
+
+
+def email_exists(email):
+
     with sqlite3.connect(DATABASE) as conn:
+
+        result = conn.execute(
+            """
+            SELECT id, starred
+            FROM subscribers
+            WHERE email = ?
+            COLLATE NOCASE
+            """,
+            (email,)
+        ).fetchone()
+
+        return result
+
+
+def add_email(email):
+
+    email = normalize_email(email)
+
+    with sqlite3.connect(DATABASE) as conn:
+
         try:
+
             conn.execute(
-                "INSERT INTO subscribers (email) VALUES (?)",
+                """
+                INSERT INTO subscribers
+                (email)
+                VALUES (?)
+                """,
                 (email,)
             )
+
             conn.commit()
+
             return True
+
         except sqlite3.IntegrityError:
+
             return False
 
 
 def get_emails():
+
     with sqlite3.connect(DATABASE) as conn:
-        return conn.execute("""
-            SELECT id, email, created_at
+
+        return conn.execute(
+            """
+            SELECT
+                id,
+                email,
+                created_at,
+                starred
             FROM subscribers
-            ORDER BY id DESC
-        """).fetchall()
+            ORDER BY
+                starred DESC,
+                id DESC
+            """
+        ).fetchall()
 
 
 def delete_email(email_id):
+
     with sqlite3.connect(DATABASE) as conn:
+
         conn.execute(
-            "DELETE FROM subscribers WHERE id = ?",
+            """
+            DELETE FROM subscribers
+            WHERE id = ?
+            """,
             (email_id,)
         )
+
         conn.commit()
+
+
+def toggle_star(email_id):
+
+    with sqlite3.connect(DATABASE) as conn:
+
+        row = conn.execute(
+            """
+            SELECT starred
+            FROM subscribers
+            WHERE id = ?
+            """,
+            (email_id,)
+        ).fetchone()
+
+        if row is None:
+            return False
+
+        new_value = 0 if row[0] else 1
+
+        conn.execute(
+            """
+            UPDATE subscribers
+            SET starred = ?
+            WHERE id = ?
+            """,
+            (new_value, email_id)
+        )
+
+        conn.commit()
+
+        return True
+
+
+# ============================================================
+# Session
+# ============================================================
+
+def create_session():
+
+    token = secrets.token_urlsafe(32)
+
+    now = int(time.time())
+
+    with sqlite3.connect(DATABASE) as conn:
+
+        conn.execute(
+            """
+            INSERT INTO sessions
+            (token, created_at)
+            VALUES (?, ?)
+            """,
+            (token, now)
+        )
+
+        conn.commit()
+
+    return token
+
+
+def delete_session(token):
+
+    if not token:
+        return
+
+    with sqlite3.connect(DATABASE) as conn:
+
+        conn.execute(
+            """
+            DELETE FROM sessions
+            WHERE token = ?
+            """,
+            (token,)
+        )
+
+        conn.commit()
+
+
+def session_valid(token):
+
+    if not token:
+        return False
+
+    now = int(time.time())
+
+    with sqlite3.connect(DATABASE) as conn:
+
+        row = conn.execute(
+            """
+            SELECT created_at
+            FROM sessions
+            WHERE token = ?
+            """,
+            (token,)
+        ).fetchone()
+
+        if row is None:
+            return False
+
+        created_at = row[0]
+
+        if now - created_at > SESSION_DURATION:
+
+            conn.execute(
+                """
+                DELETE FROM sessions
+                WHERE token = ?
+                """,
+                (token,)
+            )
+
+            conn.commit()
+
+            return False
+
+        return True
 
 
 # ============================================================
@@ -76,6 +260,7 @@ def delete_email(email_id):
 # ============================================================
 
 class WebsiteServer(BaseHTTPRequestHandler):
+
 
     # --------------------------------------------------------
     # JSON
@@ -100,6 +285,11 @@ class WebsiteServer(BaseHTTPRequestHandler):
             str(len(body))
         )
 
+        self.send_header(
+            "Cache-Control",
+            "no-store"
+        )
+
         self.end_headers()
 
         self.wfile.write(body)
@@ -111,7 +301,10 @@ class WebsiteServer(BaseHTTPRequestHandler):
 
     def get_session(self):
 
-        cookie = self.headers.get("Cookie", "")
+        cookie = self.headers.get(
+            "Cookie",
+            ""
+        )
 
         for item in cookie.split(";"):
 
@@ -119,16 +312,19 @@ class WebsiteServer(BaseHTTPRequestHandler):
 
             if item.startswith("session="):
 
-                return item.split("=", 1)[1]
+                return item.split(
+                    "=",
+                    1
+                )[1]
 
         return None
 
 
     def is_logged_in(self):
 
-        session = self.get_session()
-
-        return session is not None and session in SESSIONS
+        return session_valid(
+            self.get_session()
+        )
 
 
     # --------------------------------------------------------
@@ -137,10 +333,15 @@ class WebsiteServer(BaseHTTPRequestHandler):
 
     def do_GET(self):
 
-        path = urlparse(self.path).path
+        path = urlparse(
+            self.path
+        ).path
 
 
+        # ====================================================
         # 首页
+        # ====================================================
+
         if path == "/" or path == "/ggsjxh.html":
 
             self.serve_file(
@@ -149,25 +350,40 @@ class WebsiteServer(BaseHTTPRequestHandler):
             )
 
             return
-            
+
+
+        # ====================================================
         # CSS
+        # ====================================================
+
         if path == "/style.css":
+
             self.serve_file(
                 ROOT / "style.css",
                 "text/css; charset=utf-8"
             )
+
             return
 
+
+        # ====================================================
         # JavaScript
+        # ====================================================
+
         if path == "/main.js":
+
             self.serve_file(
                 ROOT / "main.js",
-                "text/javascript; charset=utf-8"
+                "application/javascript; charset=utf-8"
             )
+
             return
 
 
-        # CSS
+        # ====================================================
+        # CSS 文件夹
+        # ====================================================
+
         if path.startswith("/css/"):
 
             file_path = ROOT / path.lstrip("/")
@@ -182,7 +398,10 @@ class WebsiteServer(BaseHTTPRequestHandler):
                 return
 
 
-        # JavaScript
+        # ====================================================
+        # JS 文件夹
+        # ====================================================
+
         if path.startswith("/js/"):
 
             file_path = ROOT / path.lstrip("/")
@@ -197,15 +416,27 @@ class WebsiteServer(BaseHTTPRequestHandler):
                 return
 
 
+        # ====================================================
         # 登录页面
+        # ====================================================
+
         if path == "/admin/login":
+
+            if self.is_logged_in():
+
+                self.redirect("/admin")
+
+                return
 
             self.login_page()
 
             return
 
 
+        # ====================================================
         # 管理后台
+        # ====================================================
+
         if path == "/admin":
 
             if not self.is_logged_in():
@@ -219,14 +450,37 @@ class WebsiteServer(BaseHTTPRequestHandler):
             return
 
 
+        # ====================================================
+        # 后台数据
+        # ====================================================
+
+        if path == "/admin/data":
+
+            if not self.is_logged_in():
+
+                self.send_json(
+                    401,
+                    {
+                        "error": "Unauthorized."
+                    }
+                )
+
+                return
+
+            self.send_admin_data()
+
+            return
+
+
+        # ====================================================
         # 登出
+        # ====================================================
+
         if path == "/admin/logout":
 
             session = self.get_session()
 
-            if session in SESSIONS:
-
-                SESSIONS.remove(session)
+            delete_session(session)
 
             self.send_response(302)
 
@@ -245,7 +499,10 @@ class WebsiteServer(BaseHTTPRequestHandler):
             return
 
 
-        self.send_error(404, "Not Found")
+        self.send_error(
+            404,
+            "Not Found"
+        )
 
 
     # --------------------------------------------------------
@@ -254,7 +511,9 @@ class WebsiteServer(BaseHTTPRequestHandler):
 
     def do_POST(self):
 
-        path = urlparse(self.path).path
+        path = urlparse(
+            self.path
+        ).path
 
 
         # ====================================================
@@ -287,7 +546,6 @@ class WebsiteServer(BaseHTTPRequestHandler):
             )[0]
 
 
-            # 检查账号密码
             if (
                 secrets.compare_digest(
                     username,
@@ -300,9 +558,7 @@ class WebsiteServer(BaseHTTPRequestHandler):
                 )
             ):
 
-                session = secrets.token_urlsafe(32)
-
-                SESSIONS.add(session)
+                session = create_session()
 
                 self.send_response(302)
 
@@ -313,7 +569,13 @@ class WebsiteServer(BaseHTTPRequestHandler):
 
                 self.send_header(
                     "Set-Cookie",
-                    f"session={session}; Path=/; HttpOnly; SameSite=Strict"
+                    (
+                        f"session={session}; "
+                        f"Max-Age={SESSION_DURATION}; "
+                        f"Path=/; "
+                        f"HttpOnly; "
+                        f"SameSite=Strict"
+                    )
                 )
 
                 self.end_headers()
@@ -321,7 +583,6 @@ class WebsiteServer(BaseHTTPRequestHandler):
                 return
 
 
-            # 登录失败
             self.login_page(
                 "Incorrect username or password."
             )
@@ -359,9 +620,14 @@ class WebsiteServer(BaseHTTPRequestHandler):
                         raw_data.decode("utf-8")
                     )
 
-                    email = str(
-                        data.get("email", "")
-                    ).strip().lower()
+                    email = normalize_email(
+                        str(
+                            data.get(
+                                "email",
+                                ""
+                            )
+                        )
+                    )
 
                 except Exception:
 
@@ -383,13 +649,18 @@ class WebsiteServer(BaseHTTPRequestHandler):
                     raw_data.decode("utf-8")
                 )
 
-                email = data.get(
-                    "email",
-                    [""]
-                )[0].strip().lower()
+                email = normalize_email(
+                    data.get(
+                        "email",
+                        [""]
+                    )[0]
+                )
 
 
+            # =================================================
             # Gmail 检查
+            # =================================================
+
             if not email.endswith("@gmail.com"):
 
                 self.send_json(
@@ -403,7 +674,44 @@ class WebsiteServer(BaseHTTPRequestHandler):
                 return
 
 
+            # =================================================
+            # 检查是否已经存在
+            # =================================================
+
+            existing = email_exists(email)
+
+            if existing:
+
+                email_id = existing[0]
+                starred = existing[1]
+
+                if starred:
+
+                    self.send_json(
+                        409,
+                        {
+                            "error":
+                            "This Gmail address has already been marked and cannot be registered again."
+                        }
+                    )
+
+                else:
+
+                    self.send_json(
+                        200,
+                        {
+                            "message":
+                            "This email is already registered."
+                        }
+                    )
+
+                return
+
+
+            # =================================================
             # 保存
+            # =================================================
+
             if add_email(email):
 
                 self.send_json(
@@ -433,7 +741,6 @@ class WebsiteServer(BaseHTTPRequestHandler):
 
         if path.startswith("/admin/delete/"):
 
-            # 必须登录
             if not self.is_logged_in():
 
                 self.send_json(
@@ -449,24 +756,138 @@ class WebsiteServer(BaseHTTPRequestHandler):
 
             email_id = path.split("/")[-1]
 
-            if email_id.isdigit():
-
-                delete_email(
-                    int(email_id)
-                )
+            if not email_id.isdigit():
 
                 self.send_json(
-                    200,
+                    400,
                     {
-                        "message":
-                        "Deleted successfully."
+                        "error":
+                        "Invalid ID."
                     }
                 )
 
                 return
 
 
-        self.send_error(404, "Not Found")
+            delete_email(
+                int(email_id)
+            )
+
+            self.send_json(
+                200,
+                {
+                    "message":
+                    "Deleted successfully."
+                }
+            )
+
+            return
+
+
+        # ====================================================
+        # 星号
+        # ====================================================
+
+        if path.startswith("/admin/star/"):
+
+            if not self.is_logged_in():
+
+                self.send_json(
+                    401,
+                    {
+                        "error":
+                        "Unauthorized."
+                    }
+                )
+
+                return
+
+
+            email_id = path.split("/")[-1]
+
+            if not email_id.isdigit():
+
+                self.send_json(
+                    400,
+                    {
+                        "error":
+                        "Invalid ID."
+                    }
+                )
+
+                return
+
+
+            success = toggle_star(
+                int(email_id)
+            )
+
+            if success:
+
+                self.send_json(
+                    200,
+                    {
+                        "message":
+                        "Star updated."
+                    }
+                )
+
+            else:
+
+                self.send_json(
+                    404,
+                    {
+                        "error":
+                        "Email not found."
+                    }
+                )
+
+            return
+
+
+        self.send_error(
+            404,
+            "Not Found"
+        )
+
+
+    # --------------------------------------------------------
+    # 后台数据 API
+    # --------------------------------------------------------
+
+    def send_admin_data(self):
+
+        subscribers = get_emails()
+
+        data = []
+
+        for email_id, email, created_at, starred in subscribers:
+
+            data.append(
+                {
+                    "id": email_id,
+                    "email": email,
+                    "created_at": str(created_at),
+                    "starred": bool(starred)
+                }
+            )
+
+
+        starred_count = sum(
+            1
+            for item in data
+            if item["starred"]
+        )
+
+
+        self.send_json(
+            200,
+            {
+                "total": len(data),
+                "starred": starred_count,
+                "subscribers": data
+            }
+        )
 
 
     # --------------------------------------------------------
@@ -503,6 +924,11 @@ class WebsiteServer(BaseHTTPRequestHandler):
             str(len(body))
         )
 
+        self.send_header(
+            "Cache-Control",
+            "no-cache"
+        )
+
         self.end_headers()
 
         self.wfile.write(body)
@@ -528,14 +954,20 @@ class WebsiteServer(BaseHTTPRequestHandler):
     # 登录页面
     # --------------------------------------------------------
 
-    def login_page(self, error=""):
+    def login_page(
+        self,
+        error=""
+    ):
 
         error_html = ""
 
         if error:
 
             error_html = f"""
-            <p style="color:red;">
+            <p style="
+                color:#b3261e;
+                margin-bottom:15px;
+            ">
                 {html.escape(error)}
             </p>
             """
@@ -557,57 +989,98 @@ class WebsiteServer(BaseHTTPRequestHandler):
 
 <style>
 
+* {{
+    box-sizing: border-box;
+}}
+
 body {{
+
+    margin: 0;
+
     font-family: Arial, sans-serif;
+
     background: #f5f5f5;
 
+    min-height: 100vh;
+
     display: flex;
+
     justify-content: center;
+
     align-items: center;
 
-    min-height: 100vh;
+    padding: 20px;
 }}
 
 .login-box {{
+
     background: white;
 
-    width: 320px;
+    width: 100%;
+
+    max-width: 360px;
 
     padding: 30px;
 
-    border-radius: 12px;
+    border-radius: 16px;
 
     box-shadow:
-        0 5px 25px rgba(0,0,0,0.1);
+        0 5px 30px rgba(0,0,0,0.10);
 }}
 
 h1 {{
+
     margin-top: 0;
+
+    margin-bottom: 25px;
+}}
+
+label {{
+
+    display: block;
+
+    margin-bottom: 5px;
+
+    font-weight: 500;
 }}
 
 input {{
+
     width: 100%;
-    box-sizing: border-box;
 
     padding: 12px;
 
-    margin: 8px 0 15px;
+    margin-bottom: 18px;
 
     border: 1px solid #ccc;
 
-    border-radius: 6px;
+    border-radius: 8px;
+
+    font-size: 16px;
 }}
 
 button {{
+
     width: 100%;
 
     padding: 12px;
 
     border: none;
 
-    border-radius: 6px;
+    border-radius: 8px;
+
+    background: #171716;
+
+    color: white;
 
     cursor: pointer;
+
+    font-size: 16px;
+}}
+
+button:hover {{
+
+    opacity: .9;
 }}
 
 </style>
@@ -625,7 +1098,9 @@ button {{
 <form method="POST"
       action="/admin/login">
 
-<label>Username</label>
+<label>
+    Username
+</label>
 
 <input
     type="text"
@@ -634,7 +1109,9 @@ button {{
     required
 >
 
-<label>Password</label>
+<label>
+    Password
+</label>
 
 <input
     type="password"
@@ -657,8 +1134,9 @@ button {{
 """
 
 
-        body = page.encode("utf-8")
-
+        body = page.encode(
+            "utf-8"
+        )
 
         self.send_response(200)
 
@@ -678,60 +1156,12 @@ button {{
 
 
     # --------------------------------------------------------
-    # Admin
+    # Admin Dashboard
     # --------------------------------------------------------
 
     def admin_page(self):
 
-        subscribers = get_emails()
-
-        rows = ""
-
-
-        for email_id, email, created_at in subscribers:
-
-            rows += f"""
-            <tr>
-
-                <td>
-                    {email_id}
-                </td>
-
-                <td>
-                    {html.escape(email)}
-                </td>
-
-                <td>
-                    {html.escape(str(created_at))}
-                </td>
-
-                <td>
-
-                    <button
-                        onclick="deleteEmail({email_id})">
-                        Delete
-                    </button>
-
-                </td>
-
-            </tr>
-            """
-
-
-        if not rows:
-
-            rows = """
-            <tr>
-
-                <td colspan="4">
-                    No registrations yet.
-                </td>
-
-            </tr>
-            """
-
-
-        page = f"""
+        page = """
 <!DOCTYPE html>
 
 <html lang="en">
@@ -743,60 +1173,259 @@ button {{
 <meta name="viewport"
       content="width=device-width, initial-scale=1.0">
 
-<title>Admin Dashboard</title>
+<title>Registration Dashboard</title>
 
 <style>
 
-body {{
+* {
+    box-sizing: border-box;
+}
+
+body {
+
     font-family: Arial, sans-serif;
 
-    max-width: 1000px;
+    margin: 0;
 
-    margin: 40px auto;
+    background: #f5f5f5;
 
     padding: 20px;
-}}
+}
 
-.header {{
+.container {
+
+    max-width: 1100px;
+
+    margin: auto;
+}
+
+.header {
+
     display: flex;
 
     justify-content: space-between;
 
     align-items: center;
 
-    margin-bottom: 25px;
-}}
+    gap: 15px;
 
-.logout {{
-    text-decoration: none;
+    margin-bottom: 20px;
+}
 
-    padding: 8px 14px;
+.header h1 {
+
+    margin: 0;
+}
+
+.header-actions {
+
+    display: flex;
+
+    gap: 8px;
+
+    flex-wrap: wrap;
+}
+
+.header-actions button,
+.logout {
+
+    padding: 9px 14px;
 
     border: 1px solid #ccc;
 
-    border-radius: 6px;
-}}
+    border-radius: 8px;
 
-table {{
+    background: white;
+
+    cursor: pointer;
+
+    text-decoration: none;
+
+    color: black;
+}
+
+.stats {
+
+    display: flex;
+
+    gap: 12px;
+
+    margin-bottom: 20px;
+
+    flex-wrap: wrap;
+}
+
+.stat {
+
+    background: white;
+
+    border-radius: 12px;
+
+    padding: 16px 20px;
+
+    min-width: 150px;
+
+    box-shadow:
+        0 2px 10px rgba(0,0,0,0.05);
+}
+
+.stat-number {
+
+    font-size: 28px;
+
+    font-weight: bold;
+}
+
+.stat-label {
+
+    color: #777;
+
+    margin-top: 4px;
+}
+
+.table-box {
+
+    background: white;
+
+    border-radius: 12px;
+
+    overflow: hidden;
+
+    box-shadow:
+        0 2px 10px rgba(0,0,0,0.05);
+}
+
+table {
+
     width: 100%;
 
     border-collapse: collapse;
-}}
+}
 
 th,
-td {{
-    padding: 12px;
+td {
 
-    border-bottom: 1px solid #ddd;
+    padding: 13px;
+
+    border-bottom: 1px solid #eee;
 
     text-align: left;
-}}
+}
 
-button {{
-    padding: 7px 12px;
+th {
+
+    background: #fafafa;
+}
+
+.star {
+
+    border: none;
+
+    background: none;
+
+    font-size: 24px;
 
     cursor: pointer;
-}}
+
+    padding: 0;
+
+    line-height: 1;
+}
+
+.star.active {
+
+    filter: none;
+}
+
+.actions {
+
+    display: flex;
+
+    gap: 8px;
+
+    flex-wrap: wrap;
+}
+
+.delete {
+
+    border: none;
+
+    background: #eee;
+
+    padding: 7px 12px;
+
+    border-radius: 7px;
+
+    cursor: pointer;
+}
+
+.loading {
+
+    text-align: center;
+
+    padding: 30px;
+
+    color: #777;
+}
+
+.empty {
+
+    text-align: center;
+
+    padding: 40px;
+
+    color: #777;
+}
+
+.refreshing {
+
+    opacity: .6;
+
+    pointer-events: none;
+}
+
+
+/* ==========================================
+   手机
+   ========================================== */
+
+@media (max-width: 700px) {
+
+    body {
+        padding: 12px;
+    }
+
+    .header {
+
+        align-items: flex-start;
+
+        flex-direction: column;
+    }
+
+    .header-actions {
+
+        width: 100%;
+    }
+
+    .header-actions button,
+    .logout {
+
+        flex: 1;
+
+        text-align: center;
+    }
+
+    .table-box {
+
+        overflow-x: auto;
+    }
+
+    table {
+
+        min-width: 650px;
+    }
+
+}
 
 </style>
 
@@ -804,9 +1433,21 @@ button {{
 
 <body>
 
+<div class="container">
+
 <div class="header">
 
-<h1>Registration Dashboard</h1>
+<h1>
+    Registration Dashboard
+</h1>
+
+<div class="header-actions">
+
+<button
+    id="refreshButton"
+    onclick="refreshData()">
+    🔄 Refresh
+</button>
 
 <a
     class="logout"
@@ -816,12 +1457,44 @@ button {{
 
 </div>
 
+</div>
 
-<p>
-Total registrations:
-<strong>{len(subscribers)}</strong>
-</p>
 
+<div class="stats">
+
+<div class="stat">
+
+<div
+    class="stat-number"
+    id="totalCount">
+    0
+</div>
+
+<div class="stat-label">
+    Total registrations
+</div>
+
+</div>
+
+
+<div class="stat">
+
+<div
+    class="stat-number"
+    id="starredCount">
+    0
+</div>
+
+<div class="stat-label">
+    ⭐ Starred
+</div>
+
+</div>
+
+</div>
+
+
+<div class="table-box">
 
 <table>
 
@@ -829,54 +1502,381 @@ Total registrations:
 
 <tr>
 
-<th>ID</th>
+<th>
+    ⭐
+</th>
 
-<th>Email</th>
+<th>
+    ID
+</th>
 
-<th>Time</th>
+<th>
+    Email
+</th>
 
-<th>Action</th>
+<th>
+    Time
+</th>
+
+<th>
+    Action
+</th>
 
 </tr>
 
 </thead>
 
+<tbody
+    id="subscriberTable">
 
-<tbody>
+<tr>
 
-{rows}
+<td
+    colspan="5"
+    class="loading">
+
+Loading...
+
+</td>
+
+</tr>
 
 </tbody>
 
 </table>
 
+</div>
+
+</div>
+
 
 <script>
 
-async function deleteEmail(id) {{
 
-    if (!confirm("Delete this email?")) {{
-        return;
-    }}
+// ==========================================================
+// 加载数据
+// ==========================================================
 
-    const response = await fetch(
-        "/admin/delete/" + id,
-        {{
-            method: "POST"
-        }}
+async function refreshData() {
+
+    const button =
+        document.getElementById(
+            "refreshButton"
+        );
+
+    button.classList.add(
+        "refreshing"
     );
 
-    if (response.ok) {{
-        location.reload();
-    }} else {{
-        alert("You are not logged in.");
-        location.href = "/admin/login";
-    }}
+    button.textContent =
+        "⏳ Refreshing...";
 
-}}
+
+    try {
+
+        const response =
+            await fetch(
+                "/admin/data",
+                {
+                    cache: "no-store"
+                }
+            );
+
+
+        if (response.status === 401) {
+
+            location.href =
+                "/admin/login";
+
+            return;
+        }
+
+
+        if (!response.ok) {
+
+            throw new Error(
+                "Failed to load data."
+            );
+        }
+
+
+        const data =
+            await response.json();
+
+
+        renderSubscribers(
+            data
+        );
+
+
+    } catch (error) {
+
+        alert(
+            "Unable to refresh data."
+        );
+
+    } finally {
+
+        button.classList.remove(
+            "refreshing"
+        );
+
+        button.textContent =
+            "🔄 Refresh";
+    }
+}
+
+
+// ==========================================================
+// 显示数据
+// ==========================================================
+
+function renderSubscribers(data) {
+
+    document.getElementById(
+        "totalCount"
+    ).textContent =
+        data.total;
+
+
+    document.getElementById(
+        "starredCount"
+    ).textContent =
+        data.starred;
+
+
+    const table =
+        document.getElementById(
+            "subscriberTable"
+        );
+
+
+    if (
+        !data.subscribers ||
+        data.subscribers.length === 0
+    ) {
+
+        table.innerHTML = `
+
+        <tr>
+
+            <td
+                colspan="5"
+                class="empty">
+
+                No registrations yet.
+
+            </td>
+
+        </tr>
+
+        `;
+
+        return;
+    }
+
+
+    table.innerHTML =
+        data.subscribers.map(
+            item => `
+
+            <tr>
+
+                <td>
+
+                    <button
+                        class="star ${
+                            item.starred
+                            ? "active"
+                            : ""
+                        }"
+                        onclick="toggleStar(${item.id})"
+                        title="${
+                            item.starred
+                            ? "Unstar"
+                            : "Star"
+                        }">
+
+                        ${
+                            item.starred
+                            ? "★"
+                            : "☆"
+                        }
+
+                    </button>
+
+                </td>
+
+
+                <td>
+                    ${item.id}
+                </td>
+
+
+                <td>
+                    ${escapeHtml(item.email)}
+                </td>
+
+
+                <td>
+                    ${escapeHtml(item.created_at)}
+                </td>
+
+
+                <td>
+
+                    <div class="actions">
+
+                        <button
+                            class="delete"
+                            onclick="deleteEmail(${item.id})">
+
+                            🗑️ Delete
+
+                        </button>
+
+                    </div>
+
+                </td>
+
+            </tr>
+
+            `
+        ).join("");
+}
+
+
+// ==========================================================
+// 星号
+// ==========================================================
+
+async function toggleStar(id) {
+
+    try {
+
+        const response =
+            await fetch(
+                "/admin/star/" + id,
+                {
+                    method: "POST"
+                }
+            );
+
+
+        if (response.status === 401) {
+
+            location.href =
+                "/admin/login";
+
+            return;
+        }
+
+
+        if (!response.ok) {
+
+            alert(
+                "Unable to update star."
+            );
+
+            return;
+        }
+
+
+        await refreshData();
+
+    } catch (error) {
+
+        alert(
+            "Network error."
+        );
+    }
+}
+
+
+// ==========================================================
+// 删除
+// ==========================================================
+
+async function deleteEmail(id) {
+
+    if (
+        !confirm(
+            "Delete this email?"
+        )
+    ) {
+
+        return;
+    }
+
+
+    try {
+
+        const response =
+            await fetch(
+                "/admin/delete/" + id,
+                {
+                    method: "POST"
+                }
+            );
+
+
+        if (response.status === 401) {
+
+            location.href =
+                "/admin/login";
+
+            return;
+        }
+
+
+        if (!response.ok) {
+
+            alert(
+                "Unable to delete."
+            );
+
+            return;
+        }
+
+
+        await refreshData();
+
+    } catch (error) {
+
+        alert(
+            "Network error."
+        );
+    }
+}
+
+
+// ==========================================================
+// 防止 HTML 注入
+// ==========================================================
+
+function escapeHtml(value) {
+
+    return String(value)
+
+        .replaceAll("&", "&amp;")
+
+        .replaceAll("<", "&lt;")
+
+        .replaceAll(">", "&gt;")
+
+        .replaceAll('"', "&quot;")
+
+        .replaceAll("'", "&#039;");
+}
+
+
+// ==========================================================
+// 第一次进入后台自动加载
+// ==========================================================
+
+refreshData();
 
 </script>
-
 
 </body>
 
@@ -884,8 +1884,9 @@ async function deleteEmail(id) {{
 """
 
 
-        body = page.encode("utf-8")
-
+        body = page.encode(
+            "utf-8"
+        )
 
         self.send_response(200)
 
@@ -897,6 +1898,11 @@ async function deleteEmail(id) {{
         self.send_header(
             "Content-Length",
             str(len(body))
+        )
+
+        self.send_header(
+            "Cache-Control",
+            "no-store"
         )
 
         self.end_headers()
@@ -910,26 +1916,57 @@ async function deleteEmail(id) {{
 
 if __name__ == "__main__":
 
-    import os
-
     init_database()
 
-    PORT = int(os.environ.get("PORT", 8000))
+    PORT = int(
+        os.environ.get(
+            "PORT",
+            8000
+        )
+    )
+
 
     server = ThreadingHTTPServer(
         ("0.0.0.0", PORT),
         WebsiteServer
     )
 
-    print("================================")
-    print("Website:")
-    print("http://localhost:8000")
+
+    print(
+        "================================"
+    )
+
+    print(
+        "Website:"
+    )
+
+    print(
+        "http://localhost:8000"
+    )
+
     print()
-    print("Admin:")
-    print("http://localhost:8000/admin")
+
+    print(
+        "Admin:"
+    )
+
+    print(
+        "http://localhost:8000/admin"
+    )
+
     print()
-    print("Username:")
-    print(ADMIN_USERNAME)
-    print("================================")
+
+    print(
+        "Username:"
+    )
+
+    print(
+        ADMIN_USERNAME
+    )
+
+    print(
+        "================================"
+    )
+
 
     server.serve_forever()
