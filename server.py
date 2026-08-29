@@ -149,6 +149,22 @@ class WebsiteServer(BaseHTTPRequestHandler):
             )
 
             return
+            
+        # CSS
+        if path == "/style.css":
+            self.serve_file(
+                ROOT / "style.css",
+                "text/css; charset=utf-8"
+            )
+            return
+
+        # JavaScript
+        if path == "/main.js":
+            self.serve_file(
+                ROOT / "main.js",
+                "text/javascript; charset=utf-8"
+            )
+            return
 
 
         # CSS
