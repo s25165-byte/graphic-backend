@@ -894,10 +894,14 @@ async function deleteEmail(id) {{
 
 if __name__ == "__main__":
 
+    import os
+
     init_database()
 
+    PORT = int(os.environ.get("PORT", 8000))
+
     server = ThreadingHTTPServer(
-        ("0.0.0.0", 8000),
+        ("0.0.0.0", PORT),
         WebsiteServer
     )
 
