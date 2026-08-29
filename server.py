@@ -897,7 +897,7 @@ if __name__ == "__main__":
     init_database()
 
     server = ThreadingHTTPServer(
-        ("127.0.0.1", 8000),
+        ("0.0.0.0", 8000),
         WebsiteServer
     )
 
